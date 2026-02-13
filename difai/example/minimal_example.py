@@ -63,21 +63,15 @@ if __name__ == "__main__":
     agent.set_initial_beliefs(initial_belief_state=[x0+0.1, jnp.diag(jnp.array([0.1,0.1])**2)],
                               initial_belief_noise=[jnp.log(jnp.array([0.05, 0.05])), jnp.diag(jnp.array([1.0,1.0]))],
                               initial_belief_sys= [jnp.array([k]), jnp.diag(jnp.array([1]))])
-    agent.set_params(a_lims= jnp.array([[-10.0], [10.0]]))  # Action limits
-
-    print("Agent noise parameters:")
-    print(agent.params['noise_params'])
+    agent.set_params_with_defaults(a_lims= jnp.array([[-10.0], [10.0]]))  # Action limits
 
     noise_params = {'observation_std':{'id':jnp.array([0]), 'value': jnp.array([0.05])}}  # Gaussian noise on observation
-
-    print("Generative process noise parameters:")
-    print(noise_params)
 
     # Create a simulation environment with the agent and generative process
     sim = AIF_Simulation(agent=agent, generative_process=generative_process, noise_params=noise_params)
 
     print("Running inference with minimal environment...")
-    bb, xx, oo, aa, aa_applied, lll, LR = sim.run_inference_only(numsteps=100, random_a=True)
+    bb, xx, oo, aa, aa_applied, lll = sim.run_inference_only(numsteps=100, random_a=True)
     print("Inference completed.")
 
     # Plotting the results
@@ -120,10 +114,10 @@ if __name__ == "__main__":
     ### Control to target example
     target = 0.5 # Define a target position
     C=[jnp.array([target]), jnp.array([0.01**2])]  # Preference distribution preferring observations close to the target with a small variance
-    agent.set_preference_distribution(C=C, C_index=[0], sys_dependent_C=None, use_observation_preference=True)  # Set the preference distribution for the agent
+    agent.set_preference_distribution(C=C, C_index=[0], use_observation_preference=True)  # Set the preference distribution for the agent
 
     print(f"Run control to target {target}")
-    bb, bb_after_rt, xx, oo, aa, aa_applied, lll, LR, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS = sim.run_aif_perceptual_delay(numsteps=100)
+    bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS = sim.run_aif_perceptual_delay(numsteps=100)
     print("Control completed.")
 
     # Plotting the results

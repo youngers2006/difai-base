@@ -9,6 +9,7 @@ from tqdm import tqdm
 import numpy as np
 from difai.aif_tools_jax import unscented, softmax_jax, kl_jax, kl_normal_normal, gen_fixed_plans, refactor_noise_params, load_yaml_file
 from pathlib import Path
+from jax.debug import print as jaxprint
 
 # Epsilon that is added to prevent numerical problems
 EPS = 1e-12
@@ -118,97 +119,44 @@ class AIF_Agent:
 
         self._get_observation_complete = generative_model._get_observation_complete # function obtaining the deterministic observation, i.e., o = g(s)
         
-    def set_params(self, 
-               a_lims=None, n_plans=None, horizon=None, multistep=None, n_samples_o=None, 
-               n_steps_o=None, lr_o=None, use_info_gain=None, use_observation_preference=None, 
-               use_pragmatic_value=None, scale_pragmatic_value=None, select_max_pi=None, n_samples_ig_s=None, n_samples_ig_o=None, 
-               n_samples_obs_pref_s=None, n_samples_obs_pref_o=None, n_samples_a=None, 
-               n_samples_a_combine=None, n_samples_a_noise_sys=None, use_complete_ukf=None, 
-               exp_normal_sys_params=None, C_index=None, sys_dependent_C=None, state_dependent_C=None, 
-               action_prior=None, use_fixed_plans=None, state_scaling=None, standardise_state=None, reaction_time=None):
+    def set_params_with_defaults(self, **kwargs):
         """
-        Sets the parameters of the agent.
+        Sets the parameters of the agent. Possible parameters:
         Args:
             a_lims (list of np arrays): Action limits. First entry is the lower bound, second entry is the upper bound.
             n_plans (int): Number of plans rolled out during action selection. Default is 100.
-            horizon (int): Planning horizon. Default is 1.
+            horizon (int): Planning horizon. Default is 10.
             multistep (int): Control update frequency (same control is applied for multistep environment steps). Default is 1.
-            n_samples_o (int): Observation samples for belief update. Default is 100.
+            n_samples_o (int): Observation samples for belief update. Default is 300.
             n_steps_o (int): Optimization steps after new observation. Default is 50.
-            lr_o (float/tuple): Learning rate of optimization after new observation. Default is 1e-3.
-            use_info_gain (bool): Score actions by information gain. Default is True.
-            use_observation_preference (bool): Score actions by observation preference. Default is False.
+            lr_o (float/tuple): Learning rate of optimization after new observation (if grouped_state_updates is not None, tuple of learning rates for each group). Default is 1e-4.
+            use_info_gain (bool): Score actions by information gain. Default is False.
+            use_observation_preference (bool): Score actions by observation preference. Default is True.
             use_pragmatic_value (bool): Score actions by pragmatic value. Default is True.
             scale_pragmatic_value (float): Scale the pragmatic value. Default is 1.
             select_max_pi (bool): Sample plan (False) or select max negative Expected Free Energy (True). Default is True.
             n_samples_ig_s (int): State samples for information gain. Default is 3.
             n_samples_ig_o (int): Observation samples for information gain. Default is 3.
-            n_samples_obs_pref_s (int): State samples for observation preference. Default is 10.
-            n_samples_obs_pref_o (int): Observation samples for observation preference. Default is 5.
+            n_samples_obs_pref_s (int): State samples for observation preference. Default is 100.
+            n_samples_obs_pref_o (int): Observation samples for observation preference. Default is 10.
             use_observation_belief (bool): If True, the agent builds a belief over the system's observation noise standard deviation; If False, only build a belief over the system's state. Default is True.
-            n_samples_a (int): Number of state samples for action update. Default is 10.
+            n_samples_a (int): Number of state samples for action update. Default is 30.
             n_samples_a_combine (int): Number of samples used to combine state beliefs if UKF is not used. Default is 200.
             n_samples_a_noise_sys (int): Number of samples used to estimate noise system parameters. Default is 10.
-            use_complete_ukf (bool): Use the unscented Kalman filter for both state and system parameters in action update. Default is False.
-            C_index (int): Index of the observation parameter that is used to calculate the pragmatic value. Default is 0.
+            use_complete_ukf (bool): Use the unscented Kalman filter for both state and system parameters in action update. Default is True.
+            C_index (int): Index of the observation parameter that is used to calculate the pragmatic value. 
             sys_dependent_C (tuple): If not None, the mean of the preference distribution is dependent on the system parameters. First entry is the index of the observation/state vector that is affected, second entry is the index of the system parameter that defines the mean of the preference distribution.
             state_dependent_C (tuple): If not None, the mean of the preference distribution is dependent on the state. First entry is the index of the observation/state vector that is affected, second entry is the index of the state that defines the mean of the preference distribution.
             use_state_based_action_prior (bool): If True, use state-based action prior. Default is False.
-            action_prior (list): Prior for sampling possible actions defined as a list of two arrays [mean, cov]. Default is None.
+            action_prior (list): Prior for sampling possible actions defined as a list of two arrays [mean, cov]. 
             use_fixed_plans (bool): If True, use fixed plans for action selection. Default is False.
-            state_scaling (list): Scaling factors for each state dimension. Default is None.
             standardise_state (bool): If True, standardise the state by dividing it by the scaling factors. Default is False.
-        """
-        # Add non-None parameters to self.params
-        for key, value in locals().items():
-            if key != "self" and value is not None:
-                self.params[key] = value
-
-    def set_params_with_defaults(self, a_lims=None, n_plans=None, horizon=None, multistep=None, n_samples_o=None, 
-               n_steps_o=None, lr_o=None, use_info_gain=None, use_observation_preference=None, 
-               use_pragmatic_value=None, scale_pragmatic_value=None, select_max_pi=None, n_samples_ig_s=None, n_samples_ig_o=None, 
-               n_samples_obs_pref_s=None, n_samples_obs_pref_o=None, n_samples_a=None, 
-               n_samples_a_combine=None, n_samples_a_noise_sys=None, use_complete_ukf=None, 
-               exp_normal_sys_params=None, C_index=None, sys_dependent_C=None, state_dependent_C=None, 
-               action_prior=None, use_fixed_plans=None, state_scaling=None, standardise_state=None, reaction_time=None):
-        """
-        Sets the parameters of the agent.
-        Args:
-            a_lims (list of np arrays): Action limits. First entry is the lower bound, second entry is the upper bound.
-            n_plans (int): Number of plans rolled out during action selection. Default is 100.
-            horizon (int): Planning horizon. Default is 1.
-            multistep (int): Control update frequency (same control is applied for multistep environment steps). Default is 1.
-            n_samples_o (int): Observation samples for belief update. Default is 100.
-            n_steps_o (int): Optimization steps after new observation. Default is 50.
-            lr_o (float/tuple): Learning rate of optimization after new observation. Default is 1e-3.
-            use_info_gain (bool): Score actions by information gain. Default is True.
-            use_observation_preference (bool): Score actions by observation preference. Default is False.
-            use_pragmatic_value (bool): Score actions by pragmatic value. Default is True.
-            scale_pragmatic_value (float): Scale the pragmatic value. Default is 1.
-            select_max_pi (bool): Sample plan (False) or select max negative Expected Free Energy (True). Default is True.
-            n_samples_ig_s (int): State samples for information gain. Default is 3.
-            n_samples_ig_o (int): Observation samples for information gain. Default is 3.
-            n_samples_obs_pref_s (int): State samples for observation preference. Default is 10.
-            n_samples_obs_pref_o (int): Observation samples for observation preference. Default is 5.
-            use_observation_belief (bool): If True, the agent builds a belief over the system's observation noise standard deviation; If False, only build a belief over the system's state. Default is True.
-            n_samples_a (int): Number of state samples for action update. Default is 10.
-            n_samples_a_combine (int): Number of samples used to combine state beliefs if UKF is not used. Default is 200.
-            n_samples_a_noise_sys (int): Number of samples used to estimate noise system parameters. Default is 10.
-            use_complete_ukf (bool): Use the unscented Kalman filter for both state and system parameters in action update. Default is False.
-            C_index (int): Index of the observation parameter that is used to calculate the pragmatic value. Default is 0.
-            sys_dependent_C (tuple): If not None, the mean of the preference distribution is dependent on the system parameters. First entry is the index of the observation/state vector that is affected, second entry is the index of the system parameter that defines the mean of the preference distribution.
-            state_dependent_C (tuple): If not None, the mean of the preference distribution is dependent on the state. First entry is the index of the observation/state vector that is affected, second entry is the index of the state that defines the mean of the preference distribution.
-            use_state_based_action_prior (bool): If True, use state-based action prior. Default is False.
-            action_prior (list): Prior for sampling possible actions defined as a list of two arrays [mean, cov]. Default is None.
-            use_fixed_plans (bool): If True, use fixed plans for action selection. Default is False.
-            state_scaling (list): Scaling factors for each state dimension. Default is None.
-            standardise_state (bool): If True, standardise the state by dividing it by the scaling factors. Default is False.
+            state_scaling (list): Scaling factors for each state dimension
+            grouped_state_updates (list of lists): If not None, perform grouped state updates during observation update. Each sublist contains the indices of the state dimensions that are updated together.
+            exclude_observation_indices (list of arrays): List of observation indices to exclude from each belief update per group.
         """
         self.params.update(load_yaml_file(DEFAULT_CONFIG_PATH))  # Load default parameters
-        changed_params = locals()
-        changed_params.pop('self', None)  # Remove self from the parameters
-        self.set_params(**changed_params)
-
+        self.params.update(kwargs)  # Update with user-specified parameters
 
     def load_parameters_with_defaults(self, user_config_path):
         """
@@ -255,10 +203,9 @@ class AIF_Agent:
         self.params["C_index"] = C_index
         self.params["sys_dependent_C"] = sys_dependent_C
         self.params["state_dependent_C"] = state_dependent_C
-        self.C = C
+        self.params["C"] = C
         # Make sure C[1] is a 2D array (covariance matrix)
-        self.C[1] = jnp.atleast_2d(self.C[1])
-        self.C_entropy = 0.5 * jnp.log(jnp.linalg.det(self.C[1])) + self.C[0].shape[0]/2 +  self.C[0].shape[0]/2 * jnp.log(2 * jnp.pi)
+        self.params["C"][1] = jnp.atleast_2d(self.params["C"][1])
 
     def initialize(self):
         self.params["has_observation_noise"] = "observation_std" in self.params
@@ -279,6 +226,7 @@ class AIF_Agent:
             self.params["fixed_plans"] = gen_fixed_plans(self.params["a_lims"], self.params["horizon"], self.params["dim_action"], self.params["n_plans"], uniform=(self.params["use_fixed_plans"]=='uniform'))
             self.params['n_plans'] = self.params["fixed_plans"].shape[0]
 
+
         # Make sure everything is at least 1d/2d
         self.params["initial_belief_state"][0] = jnp.atleast_1d(self.params["initial_belief_state"][0])
         self.params["initial_belief_state"][1] = jnp.atleast_2d(self.params["initial_belief_state"][1])
@@ -296,7 +244,8 @@ class AIF_Agent:
         if self.params['dim_noise'] > 0:
             assert jnp.all(jnp.linalg.eigh(self.params["initial_belief_sys"][1])[0] > 0), "Initial belief covariance about sys paramsneeds to be positive definite."
 
-        #Jitting
+
+    #Jitting
     def _jit_methods(self):
 
         ## Former Markov Blanket methods
@@ -317,8 +266,14 @@ class AIF_Agent:
         _lambda_update_belief_state_obs = lambda belief_state, belief_noise, belief_sys, o, key: self._update_belief_state_obs(belief_state, belief_noise, belief_sys, o, self._get_observation_complete, _lambda_sample_obs_noise_params, self.params, key)
         self.update_belief_state_obs = jit(_lambda_update_belief_state_obs)
 
+        # Planning
+        _lambda_sample_preference_distributions = lambda belief_state_prior, belief_sys_params_prior, key: self._sample_preference_distributions(belief_state_prior, belief_sys_params_prior, self.params, key)
+        self.sample_preference_distributions = jit(_lambda_sample_preference_distributions)
+        _lambda_calc_nefe = lambda pi, C_mean_samples, belief_state_prior, belief_noise_prior, belief_sys_params_prior, key: self._calc_nefe(pi, C_mean_samples, belief_state_prior, belief_noise_prior, belief_sys_params_prior, _lambda_update_belief_state_obs, _lambda_update_belief_state, self._get_observation_complete, self._calc_pragmatic_value, _lambda_sample_obs_noise_params, self.params, key)
+        self.calc_nefe = jit(_lambda_calc_nefe)
+
         self.select_action = jit(lambda belief_state, belief_noise, belief_sys, key=None:
-                                self._select_action(belief_state, belief_noise, belief_sys, self.C, _lambda_update_belief_state_obs, _lambda_update_belief_state, self._get_observation_complete, self._calc_pragmatic_value, _lambda_sample_obs_noise_params, self.params, key))
+                                self._select_action(belief_state, belief_noise, belief_sys, _lambda_update_belief_state_obs, _lambda_update_belief_state, self._get_observation_complete, self._calc_pragmatic_value, _lambda_sample_obs_noise_params, _lambda_sample_preference_distributions, _lambda_calc_nefe, self.params, key))
     def reset(self):
         # initialize belief
         self.belief_state = self.params["initial_belief_state"]
@@ -577,9 +532,7 @@ class AIF_Agent:
 
         return belief_state, belief_states
     
-
     
-
     @staticmethod
     def _update_belief_state_obs(belief_state, belief_noise, belief_sys, o, get_observation_complete, sample_obs_noise_params, params, key):
         '''Performs Bayesian variational inference to update a prior belief when observing o.
@@ -597,20 +550,10 @@ class AIF_Agent:
         n_steps_o =  params["n_steps_o"]
         lr_o =  params["lr_o"]
         dim_state = params['dim_state']
-        dim_belief = len(belief_state[0]) #params['dim_belief']
         dim_observation = params['dim_observation']
-        tril_indices =  jnp.tril_indices(dim_belief) #params['tril_indices'] 
-        prior_mean = belief_state[0]
-        prior_cov = belief_state[1]
-
-        # Normalise state
-        if params['standardise_state']:
-            state_scaling = jnp.array(params['state_scaling'])
-            prior_mean = prior_mean / state_scaling
-            cov_scaling = (state_scaling[:, None] * state_scaling[None, :])
-            prior_cov = prior_cov * cov_scaling**(-1)
-        # initialise belief to belief before observing
-        opt_params = jnp.hstack([prior_mean, jnp.linalg.cholesky(prior_cov)[tril_indices].reshape((-1,))])
+        state_scaling = params['state_scaling']
+        grouped_state_updates = params['grouped_state_updates']
+        exclude_observation_indices = params['exclude_observation_indices']
 
         # Sample system parameters
         key, use_key = random.split(key)
@@ -619,80 +562,155 @@ class AIF_Agent:
         # Sample noise belief
         key, use_key = random.split(key)
         _, sample_observation_var =  sample_obs_noise_params(belief_noise, n_samples_o, use_key)
-        
-        optimizer = optax.rmsprop(learning_rate=lr_o, eps=EPS)
 
-        opt_state = optimizer.init(opt_params)
-    
-        def lossfct(opt_params, step_i, key):
+        def update_belief_single_group(prior_mean, prior_cov, tril_indices, mean_indices, cov_indices, state_scaling, lr_o, exclude_observation_indices, key):
+            dim_belief = len(prior_mean)
+            # Normalise state
+            if state_scaling is not None:
+                # Calculate scaling factors for each state dimension
+                state_scaling = jnp.array(state_scaling)
+                prior_mean = prior_mean / state_scaling
+                cov_scaling = (state_scaling[:, None] * state_scaling[None, :])
+                prior_cov = prior_cov * cov_scaling**(-1)
+
+            if exclude_observation_indices is not None:
+                use_observation_indices = jnp.array([i for i in range(dim_observation) if i not in exclude_observation_indices])
+                o_used = o[use_observation_indices]
+                sample_observation_var_used = sample_observation_var[:, use_observation_indices]
+                dim_observation_used = use_observation_indices.shape[0]
+            else:
+                o_used = o
+                sample_observation_var_used = sample_observation_var
+                dim_observation_used = dim_observation
+
+            # initialise belief to belief before observing
+            opt_params = jnp.hstack([prior_mean, jnp.linalg.cholesky(prior_cov)[tril_indices].reshape((-1,))])
+
+            optimizer = optax.rmsprop(learning_rate=lr_o, eps=EPS)
+
+            opt_state = optimizer.init(opt_params)
+        
+            def lossfct(opt_params, step_i, key):
+                posterior_mean = opt_params[:dim_belief]
+                # putting back together tril
+                posterior_scale_tril = jnp.zeros((dim_belief,dim_belief)).at[tril_indices].set(opt_params[dim_belief:])
+                posterior_cov = posterior_scale_tril @ posterior_scale_tril.T
+
+                if state_scaling is not None:
+                # Rescale posterior mean and covariance
+                    posterior_mean = posterior_mean * state_scaling
+                    posterior_cov = posterior_cov * cov_scaling
+
+                # Sample states 
+                key, use_key = random.split(key)
+                # Augment sample states if optimized in groups
+                if grouped_state_updates:
+                    sample_states = random.multivariate_normal(use_key, belief_state[0].at[mean_indices].set(posterior_mean), belief_state[1].at[cov_indices].set(posterior_cov), shape=(n_samples_o,))
+                else:
+                    sample_states = random.multivariate_normal(use_key, posterior_mean, posterior_cov, shape=(n_samples_o,))
+                
+                # Get observations from these states
+                sample_observations = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states[:,:dim_state], sample_sys])) # sampled observations
+
+                if exclude_observation_indices is not None:
+                    sample_observations = sample_observations[:, use_observation_indices]
+
+                def nll_single(o_var):
+                    s_o = o_var[:dim_observation_used]
+                    s_o_var = o_var[dim_observation_used:]
+                    diff = s_o-o_used
+                    return 0.5 * (jnp.log(jnp.prod(s_o_var)) + jnp.dot(diff.T, (1/jnp.clip(s_o_var, min=EPS)) * diff) + s_o.shape[0] *  jnp.log(2 * jnp.pi))
+
+                nll = jnp.apply_along_axis(nll_single, 1, jnp.hstack([sample_observations.reshape((-1,dim_observation_used)), sample_observation_var_used.reshape((-1,dim_observation_used))]))
+                if state_scaling is not None:
+                    kl = kl_jax(posterior_mean, posterior_cov, prior_mean* state_scaling, prior_cov * cov_scaling)
+                else:
+                    kl = kl_jax(posterior_mean, posterior_cov, prior_mean, prior_cov)
+
+                loss = kl + nll.mean()
+
+                return loss
+
+            def train_step(step_i, opt_state, opt_params, key):
+                loss, grads = value_and_grad(lossfct, argnums=0)(opt_params, step_i, key)
+
+                ### optax
+                updates, opt_state = optimizer.update(grads, opt_state)
+                opt_params = optax.apply_updates(opt_params, updates)
+
+                return loss, opt_state, opt_params
+
+            def body_fun(i, carry):
+                key, use_key = random.split(carry[0])
+                opt_state = carry[2]
+                opt_params = carry[3]
+                loss, opt_state, opt_params = train_step(i, opt_state, opt_params, use_key)
+                return (key, carry[1].at[i].set(loss), opt_state, opt_params)
+
+            opt_result = fori_loop(0, n_steps_o, body_fun, (key, jnp.zeros((n_steps_o,)), opt_state, opt_params))
+
+            ll = opt_result[1]
+            opt_params = opt_result[3]
+
             posterior_mean = opt_params[:dim_belief]
             # putting back together tril
-            posterior_scale_tril = jnp.zeros((dim_belief,dim_belief)).at[tril_indices].set(opt_params[dim_belief:])
+            posterior_scale_tril = jnp.zeros((dim_belief,dim_belief)).at[jnp.tril_indices(dim_belief)].set(opt_params[dim_belief:]) 
+
             posterior_cov = posterior_scale_tril @ posterior_scale_tril.T
 
-            if params['standardise_state']:
-            # Rescale posterior mean and covariance
+            if state_scaling:
+                # Rescale posterior mean and covariance
                 posterior_mean = posterior_mean * state_scaling
                 posterior_cov = posterior_cov * cov_scaling
-                # posterior_cov = posterior_cov * (state_scaling[:, None] * state_scaling[None, :])
 
-            # Sample states 
+            posterior_cov += jnp.diag(jnp.ones(dim_belief)*EPS) # Add small value to diagonal to ensure positive definiteness
+
+            belief_state_posterior = [posterior_mean, posterior_cov]
+            return belief_state_posterior, ll
+
+        # Split state for grouped updates
+        if grouped_state_updates:
+            group_state_indices = grouped_state_updates # List of index touples which should be updated together
+            dim_belief = len(belief_state[0])
+            posterior_mean = jnp.zeros((dim_belief,))
+            posterior_cov = jnp.zeros((dim_belief, dim_belief))
+            lls = jnp.zeros((len(group_state_indices), n_steps_o))
+            for gix, group in enumerate(group_state_indices):
+                mean_indices = jnp.array(group)
+                cov_indices = jnp.ix_(mean_indices, mean_indices)
+                prior_mean = belief_state[0][mean_indices]
+                prior_cov = belief_state[1][cov_indices]
+                dim_belief = len(prior_mean)
+                tril_indices =  jnp.tril_indices(dim_belief)
+                lr_o_group = lr_o[gix]
+                if state_scaling:
+                    group_state_scaling = state_scaling[mean_indices]
+                else:
+                    group_state_scaling = None
+                if exclude_observation_indices is not None:
+                    exclude_observation_indices_group = exclude_observation_indices[gix]
+                else:
+                    exclude_observation_indices_group = None
+                key, use_key = random.split(key)
+                group_posterior, group_ll = update_belief_single_group(prior_mean, prior_cov, tril_indices, mean_indices, cov_indices, group_state_scaling, lr_o_group, exclude_observation_indices_group, use_key)
+                posterior_mean = posterior_mean.at[mean_indices].set(group_posterior[0])
+                posterior_cov = posterior_cov.at[cov_indices].set(group_posterior[1])
+                lls = lls.at[gix, :].set(group_ll)
+            
+            belief_state_posterior = [posterior_mean, posterior_cov]
+            return belief_state_posterior, jnp.sum(lls, axis=0)
+
+        else:
+            prior_mean = belief_state[0]
+            prior_cov = belief_state[1]
+            dim_belief = len(prior_mean)
+            tril_indices =  jnp.tril_indices(dim_belief) #params['tril_indices'] 
+            mean_indices = jnp.arange(dim_belief)
+            cov_indices = jnp.ix_(mean_indices, mean_indices)
+            # Return update for all state dimensions together
             key, use_key = random.split(key)
-            sample_states = random.multivariate_normal(use_key, posterior_mean, posterior_cov, shape=(n_samples_o,) )
+            return update_belief_single_group(prior_mean, prior_cov, tril_indices, mean_indices, cov_indices, state_scaling, lr_o, exclude_observation_indices, use_key)
 
-            # Get observations from these states
-            sample_observations = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states[:,:dim_state], sample_sys])) # sampled observations
-
-            def nll_single(o_var):
-                s_o = o_var[:dim_observation]
-                s_o_var = o_var[dim_observation:]
-                diff = s_o-o
-                return 0.5 * (jnp.log(jnp.prod(s_o_var)) + jnp.dot(diff.T, (1/jnp.clip(s_o_var, min=EPS)) * diff) + s_o.shape[0] *  jnp.log(2 * jnp.pi))
-
-            nll = jnp.apply_along_axis(nll_single, 1, jnp.hstack([sample_observations.reshape((-1,dim_observation)), sample_observation_var.reshape((-1,dim_observation))]))
-            kl = kl_jax(posterior_mean, posterior_cov, prior_mean, prior_cov)
-
-            loss = kl + nll.mean()
-
-            return loss
-
-        def train_step(step_i, opt_state, opt_params, key):
-            loss, grads = value_and_grad(lossfct, argnums=0)(opt_params, step_i, key)
-
-            ### optax
-            updates, opt_state = optimizer.update(grads, opt_state)
-            opt_params = optax.apply_updates(opt_params, updates)
-
-            return loss, opt_state, opt_params
-
-        def body_fun(i, carry):
-            key, use_key = random.split(carry[0])
-            opt_state = carry[2]
-            opt_params = carry[3]
-            loss, opt_state, opt_params = train_step(i, opt_state, opt_params, use_key)
-            return (key, carry[1].at[i].set(loss), opt_state, opt_params)
-
-        opt_result = fori_loop(0, n_steps_o, body_fun, (key, jnp.zeros((n_steps_o,)), opt_state, opt_params))
-
-        ll = opt_result[1]
-        opt_params = opt_result[3]
-
-        posterior_mean = opt_params[:dim_belief]
-        # putting back together tril
-        posterior_scale_tril = jnp.zeros((dim_belief,dim_belief)).at[jnp.tril_indices(dim_belief)].set(opt_params[dim_belief:]) 
-
-        posterior_cov = posterior_scale_tril @ posterior_scale_tril.T
-
-        if params['standardise_state']:
-            # Rescale posterior mean and covariance
-            posterior_mean = posterior_mean * state_scaling
-            posterior_cov = posterior_cov * cov_scaling
-            # posterior_cov = posterior_cov * (state_scaling[:, None] * state_scaling[None, :])
-
-        posterior_cov += jnp.diag(jnp.ones(dim_belief)*EPS) # Add small value to diagonal to ensure positive definiteness
-
-        belief_state = [posterior_mean, posterior_cov]
-        return belief_state, ll, lr_o
     
     @staticmethod
     def _calc_pragmatic_value(belief_state, C, params):
@@ -700,14 +718,12 @@ class AIF_Agent:
         marginal_theta = [belief_state[0][C_index], jnp.sqrt(belief_state[1][C_index,C_index])]
         dist = kl_normal_normal(*marginal_theta, *C)
         return -dist
+    
 
     @staticmethod
-    def _select_action(belief_state_prior, belief_noise_prior, belief_sys_params_prior, C, _update_belief, _update_belief_a, get_observation_complete, _calc_pragmatic_value, sample_obs_noise_params, params, key): # return plans, p of selecting each, and marginal p of actions
-        a_lims = params['a_lims']
-        n_plans = params['n_plans']
+    def _calc_nefe(pi, C_mean_samples, belief_state_prior, belief_noise_prior, belief_sys_params_prior, _update_belief, _update_belief_a, get_observation_complete, _calc_pragmatic_value, sample_obs_noise_params, params, key):
         horizon = params['horizon']
         multistep = params['multistep']
-        select_max_pi = params['select_max_pi']
         scale_pragmatic_value = params['scale_pragmatic_value']
         n_samples_ig_s = params['n_samples_ig_s']
         n_samples_ig_o = params['n_samples_ig_o']
@@ -715,31 +731,147 @@ class AIF_Agent:
         n_samples_obs_pref_o = params['n_samples_obs_pref_o']
         n_samples_ig = n_samples_ig_s * n_samples_ig_o
         dim_state = params["dim_state"]
-        dim_action = params["dim_action"]
         dim_observation = params["dim_observation"]
         has_observation_noise = params['has_observation_noise']
         use_info_gain = params['use_info_gain']
         use_observation_preference = params['use_observation_preference']
-        action_prior = params['action_prior']
-        use_fixed_plans = params['use_fixed_plans']
         sys_dependent_C = params['sys_dependent_C']
         state_dependent_C = params['state_dependent_C']
+        C = params["C"]
         C_index = params['C_index']
         
-        if action_prior is None:
-            if use_fixed_plans:
-                plans = params["fixed_plans"]
-            else:
-                # Sample plans (actions) from uniform distribution based on action limits
+        def rollout_step(i, carry, pi):
+            key = carry[0]
+            nefes = carry[1]
+            pragmatics = carry[2]
+            info_gains = carry[3]
+            belief_state = carry[4]
+            belief_noise = belief_noise_prior
+            belief_sys = belief_sys_params_prior
+
+            a = pi[i] # selected action in step i
+            nefe = 0 # negative expected free energy for this timestep
+            pragmatic = 0 # pragmatic value for this timestep
+            info_gain = 0 # information gain for this timestep
+
+            # Where will I be after taking action a for multistep steps?
+            belief_state_pred = belief_state
+            for _ in range(multistep):
                 key, use_key = random.split(key)
-                plans = random.uniform(key=use_key, shape=(n_plans, horizon, dim_action), minval=a_lims[0], maxval=a_lims[1])
-        else:
-            # Sample plans from action prior
-            key, use_key = random.split(key)
-            plans = random.multivariate_normal(key=use_key, mean=action_prior[0], cov=action_prior[1], shape=(n_plans, horizon,))
+                belief_state_pred, _ = _update_belief_a(belief_state_pred, belief_noise, belief_sys, a=a, key=use_key) 
+
+            if use_info_gain or use_observation_preference:
+                if use_observation_preference:
+                    # New version for dim_obs >= 1
+                    key, use_key = random.split(key)
+                    sample_states = random.multivariate_normal(use_key, *belief_state_pred, shape=(n_samples_obs_pref_s,))  # sample from state belief
+
+                    key, use_key = random.split(key)
+                    _, obs_variance = sample_obs_noise_params(belief_noise, n_samples_obs_pref_s, use_key)
+
+                    # Sample system parameters
+                    key, use_key = random.split(key)
+                    sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1], shape=(n_samples_obs_pref_s,))
+
+                    # Halluzinate observations
+                    oo_noise_free = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states, sample_sys])) # sampled observations
+                    
+                    def halluzinate_obs(o_noise_free, obs_variance_single, key):
+                        if has_observation_noise:
+                            hal_o = random.multivariate_normal(key, o_noise_free, jnp.diag(obs_variance_single), shape=(n_samples_obs_pref_o,))
+                        else:
+                            hal_o = jnp.tile(o_noise_free, (n_samples_obs_pref_o,1))
+                        return hal_o
+                    keys = random.split(key, num=n_samples_obs_pref_s+1)
+                    key = keys[0]
+                    batch_keys = keys[1:]
+                    oo_pref = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
+
+                    # Do I like observing this?
+                    oo_pref = oo_pref[:,C_index]
+                    if sys_dependent_C is not None or state_dependent_C is not None:
+                        pragmatic =  jnp.mean(jnp.apply_along_axis(lambda C_mean: logpdf(oo_pref, C_mean, C[1]).mean(), 1, C_mean_samples))
+                    else:
+                        pragmatic = logpdf(oo_pref, *C).mean()
+                    
+                    nefe += scale_pragmatic_value * pragmatic
+
+                if use_info_gain:
+                    if n_samples_ig_s < 1 or n_samples_ig_o < 1:
+                        # Sample system parameters
+                        key, use_key = random.split(key)
+                        sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1])
+                        # Use mean to calculate info gain
+                        o_mean = get_observation_complete(belief_state_pred[0], *sample_sys) # sampled observation
+                        key, use_key = random.split(key)
+                        belief_state_o, _ = _update_belief(belief_state_pred, belief_noise, belief_sys, o_mean, key=use_key)
+                        info_gain = kl_jax(*belief_state_o, *belief_state)
+                    else:
+                        if n_samples_ig_s * n_samples_ig_o > n_samples_obs_pref_s * n_samples_obs_pref_o:
+                            # New version for dim_obs >= 1
+                            key, use_key = random.split(key)
+                            sample_states = random.multivariate_normal(use_key, *belief_state_pred, shape=(n_samples_ig_s,))  # sample from state belief
+
+                            key, use_key = random.split(key)
+                            _, obs_variance = sample_obs_noise_params(belief_noise, n_samples_ig_s, use_key)
+                            # Sample system parameters
+                            key, use_key = random.split(key)
+                            sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1], shape=(n_samples_ig_s,))
+                            # Halluzinate observations
+                            oo_noise_free = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states, sample_sys])) # sampled observations
+                            def halluzinate_obs(o_noise_free, obs_variance_single, key):
+                                hal_o = random.multivariate_normal(key, o_noise_free, jnp.diag(obs_variance_single), shape=(n_samples_obs_pref_o,))
+                                return hal_o
+                            keys = random.split(key, num=n_samples_ig_s+1)
+                            key = keys[0]
+                            batch_keys = keys[1:]
+                            oo = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
+                        else:
+                            # Use the same observations as for observation preference
+                            # Select a subset of the observations
+                            key, use_key = random.split(key)
+                            oo = random.choice(use_key, oo_pref, shape=(n_samples_ig_s * n_samples_ig_o,), replace=False) # select n_samples_ig_s * n_samples_ig_o observations from the observations halluzinated for the observation preference
+
+                        # # Do I learn about s from observing o?
+                        def calc_info_gain(o, key):
+                            belief_state_o, _, _ = _update_belief(belief_state_pred, belief_noise, belief_sys, o, key=key)
+                            kl_state = kl_jax(*belief_state_o, *belief_state)
+                            return kl_state 
+                        
+                        keys = random.split(key, num=n_samples_ig+1)
+                        key = keys[0]
+                        batch_keys = keys[1:]
+                        kl_o = vmap(calc_info_gain, in_axes=(0,0), out_axes=0)(oo, batch_keys)
+                        info_gain = jnp.mean(kl_o)
+                    nefe += info_gain
+
+            elif not use_observation_preference:
+                # Use state-based preference distribution
+                # Do I like being there?
+                pragmatic = _calc_pragmatic_value(belief_state_pred, C=C, params=params)
+                nefe += scale_pragmatic_value * pragmatic
+
+            # concatenate expected free energy across future time steps
+            return (key, nefes.at[i].set(nefe), pragmatics.at[i].set(pragmatic), info_gains.at[i].set(info_gain), belief_state_pred)
+            ## End rollout_step
+        
+        key, use_key = random.split(key)
+        _, step_nefes, step_pragmatics, step_info_gains, _ = fori_loop(0, horizon, lambda i, carry: rollout_step(i, carry, pi), (use_key, jnp.zeros((horizon,)), jnp.zeros((horizon,)), jnp.zeros((horizon,)), belief_state_prior))
+        
+        return step_nefes, step_pragmatics, step_info_gains # expected value over steps
+        ## End calc_nefe
+
+    @staticmethod
+    def _sample_preference_distributions(belief_state_prior, belief_sys_params_prior, params, key):
+        n_samples_obs_pref_s = params['n_samples_obs_pref_s']
+        sys_dependent_C = params['sys_dependent_C']
+        state_dependent_C = params['state_dependent_C']
+        C = params["C"]
 
         if sys_dependent_C is not None or state_dependent_C is not None:
             C_mean_samples = jnp.tile(C[0], (n_samples_obs_pref_s,1) )
+        else:
+            C_mean_samples = None
         if sys_dependent_C is not None:
             # Sample preference priors
             key, use_key = random.split(key)
@@ -753,150 +885,64 @@ class AIF_Agent:
             
             for i in range(n_samples_obs_pref_s):
                 C_mean_samples = C_mean_samples.at[i, state_dependent_C[0]].set(sample_state_for_C[i, state_dependent_C[1]])    
+        return C_mean_samples
 
-        # parallelized function
-        def calc_nefe(pi, key):
-            def rollout_step(i, carry, pi):
-                key = carry[0]
-                nefes = carry[1]
-                pragmatics = carry[2]
-                info_gains = carry[3]
-                belief_state = carry[4]
-                belief_noise = belief_noise_prior
-                belief_sys = belief_sys_params_prior
-
-                a = pi[i] # selected action in step i
-                nefe = 0 # negative expected free energy for this timestep
-                pragmatic = 0 # pragmatic value for this timestep
-                info_gain = 0 # information gain for this timestep
-
-                # Where will I be after taking action a for multistep steps?
-                belief_state_pred = belief_state
-                for _ in range(multistep):
-                    key, use_key = random.split(key)
-                    belief_state_pred, _ = _update_belief_a(belief_state_pred, belief_noise, belief_sys, a=a, key=use_key) 
-
-                if use_info_gain or use_observation_preference:
-                    if use_observation_preference:
-                        # New version for dim_obs >= 1
-                        key, use_key = random.split(key)
-                        sample_states = random.multivariate_normal(use_key, *belief_state_pred, shape=(n_samples_obs_pref_s,))  # sample from state belief
-
-                        key, use_key = random.split(key)
-                        _, obs_variance = sample_obs_noise_params(belief_noise, n_samples_obs_pref_s, use_key)
-
-                        # Sample system parameters
-                        key, use_key = random.split(key)
-                        sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1], shape=(n_samples_obs_pref_s,))
-
-                        # Halluzinate observations
-                        oo_noise_free = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states, sample_sys])) # sampled observations
-                        
-                        def halluzinate_obs(o_noise_free, obs_variance_single, key):
-                            if has_observation_noise:
-                                hal_o = random.multivariate_normal(key, o_noise_free, jnp.diag(obs_variance_single), shape=(n_samples_obs_pref_o,))
-                            else:
-                                hal_o = jnp.tile(o_noise_free, (n_samples_obs_pref_o,1))
-                            return hal_o
-                        keys = random.split(key, num=n_samples_obs_pref_s+1)
-                        key = keys[0]
-                        batch_keys = keys[1:]
-                        oo_pref = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
-
-                        # Do I like observing this?
-                        oo_pref = oo_pref[:,C_index]
-                        if sys_dependent_C is not None or state_dependent_C is not None:
-                            pragmatic =  jnp.mean(jnp.apply_along_axis(lambda C_mean: logpdf(oo_pref, C_mean, C[1]).mean(), 1, C_mean_samples))
-                        else:
-                            pragmatic = logpdf(oo_pref, *C).mean()
-                        
-                        nefe += scale_pragmatic_value * pragmatic
-
-                    if use_info_gain:
-                        if n_samples_ig_s < 1 or n_samples_ig_o < 1:
-                            # Sample system parameters
-                            key, use_key = random.split(key)
-                            sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1])
-                            # Use mean to calculate info gain
-                            o_mean = get_observation_complete(belief_state_pred[0], *sample_sys) # sampled observation
-                            key, use_key = random.split(key)
-                            belief_state_o, _, _ = _update_belief(belief_state_pred, belief_noise, belief_sys, o_mean, key=use_key)
-                            info_gain = kl_jax(*belief_state_o, *belief_state)
-                        else:
-                            if n_samples_ig_s * n_samples_ig_o > n_samples_obs_pref_s * n_samples_obs_pref_o:
-                                # New version for dim_obs >= 1
-                                key, use_key = random.split(key)
-                                sample_states = random.multivariate_normal(use_key, *belief_state_pred, shape=(n_samples_ig_s,))  # sample from state belief
-
-                                key, use_key = random.split(key)
-                                _, obs_variance = sample_obs_noise_params(belief_noise, n_samples_ig_s, use_key)
-                                # Sample system parameters
-                                key, use_key = random.split(key)
-                                sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1], shape=(n_samples_ig_s,))
-                                # Halluzinate observations
-                                oo_noise_free = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states, sample_sys])) # sampled observations
-                                def halluzinate_obs(o_noise_free, obs_variance_single, key):
-                                    hal_o = random.multivariate_normal(key, o_noise_free, jnp.diag(obs_variance_single), shape=(n_samples_obs_pref_o,))
-                                    return hal_o
-                                keys = random.split(key, num=n_samples_ig_s+1)
-                                key = keys[0]
-                                batch_keys = keys[1:]
-                                oo = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
-                            else:
-                                # Use the same observations as for observation preference
-                                # Select a subset of the observations
-                                key, use_key = random.split(key)
-                                oo = random.choice(use_key, oo_pref, shape=(n_samples_ig_s * n_samples_ig_o,), replace=False) # select n_samples_ig_s * n_samples_ig_o observations from the observations halluzinated for the observation preference
-
-                            # # Do I learn about s from observing o?
-                            def calc_info_gain(o, key):
-                                belief_state_o, _, _ = _update_belief(belief_state_pred, belief_noise, belief_sys, o, key=key)
-                                kl_state = kl_jax(*belief_state_o, *belief_state)
-                                return kl_state 
-                            
-                            keys = random.split(key, num=n_samples_ig+1)
-                            key = keys[0]
-                            batch_keys = keys[1:]
-                            kl_o = vmap(calc_info_gain, in_axes=(0,0), out_axes=0)(oo, batch_keys)
-                            info_gain = jnp.mean(kl_o)
-                        nefe += info_gain
-
-                elif not use_observation_preference:
-                    # Use state-based preference distribution
-                    # Do I like being there?
-                    pragmatic = _calc_pragmatic_value(belief_state_pred, C=C, params=params)
-                    nefe += scale_pragmatic_value * pragmatic
-
-                # concatenate expected free energy across future time steps
-                return (key, nefes.at[i].set(nefe), pragmatics.at[i].set(pragmatic), info_gains.at[i].set(info_gain), belief_state_pred)
-                ## End rollout_step
-            
+    @staticmethod
+    def _select_action(belief_state_prior, belief_noise_prior, belief_sys_params_prior, _update_belief, _update_belief_a, get_observation_complete, _calc_pragmatic_value, sample_obs_noise_params, sample_preference_distributions, calc_nefe, params, key): # return plans, p of selecting each, and marginal p of actions
+        a_lims = params['a_lims']
+        n_plans = params['n_plans']
+        horizon = params['horizon']
+        select_max_pi = params['select_max_pi']
+        dim_action = params["dim_action"]
+        action_prior = params['action_prior']
+        use_fixed_plans = params['use_fixed_plans']
+        
+        if action_prior is None:
+            if use_fixed_plans:
+                plans = params["fixed_plans"]
+            else:
+                # Sample plans (actions) from uniform distribution based on action limits
+                key, use_key = random.split(key)
+                plans = random.uniform(key=use_key, shape=(n_plans, horizon, dim_action), minval=a_lims[0], maxval=a_lims[1])
+        else:
+            # Sample plans from action prior
             key, use_key = random.split(key)
-            _, step_nefes, step_pragmatics, step_info_gains, _ = fori_loop(0, horizon, lambda i, carry: rollout_step(i, carry, pi), (use_key, jnp.zeros((horizon,)), jnp.zeros((horizon,)), jnp.zeros((horizon,)), belief_state_prior))
-           
-            return step_nefes.mean(), step_pragmatics.mean(), step_info_gains.mean() # expected value over steps
-            ## End calc_nefe
+            if dim_action > 1:
+                plans = random.multivariate_normal(key=use_key, mean=action_prior[0], cov=action_prior[1], shape=(n_plans, horizon,))
+            else:
+                plans = action_prior[0] + jnp.sqrt(action_prior[1]) * random.normal(key=use_key, shape=(n_plans, horizon,))
 
+        # sample preference distributions (if needed for state or system dependent preferences)
+        key, use_key = random.split(key)
+        C_mean_samples = sample_preference_distributions(belief_state_prior, belief_sys_params_prior, key)
+
+        
         # evaluate negative expected free energy of all plans in parallel
         keys = random.split(key, num=n_plans+1)
         key = keys[0]
         batch_keys = keys[1:]
-        nefes, pragmatics, info_gains = vmap(lambda pi, key: calc_nefe(pi, key), in_axes=(0,0), out_axes=(0,0,0))(plans, batch_keys)
+        nefes, pragmatics, info_gains = vmap(lambda pi, key: calc_nefe(pi, C_mean_samples, belief_state_prior, belief_noise_prior, belief_sys_params_prior, key), in_axes=(0,0), out_axes=(0,0,0))(plans, batch_keys)
 
-        # compute probability of following each plan
-        p_pi = softmax_jax(nefes)
+        nefes_mean = nefes.mean(axis=1)
 
         if select_max_pi:
-            plani = jnp.argmax(nefes)
+            plani = jnp.argmax(nefes_mean)
         else:
+            # compute probability of following each plan
+            p_pi = softmax_jax(nefes_mean)
             key, use_key = random.split(key)
             plani = random.choice(use_key, n_plans, p=p_pi)
 
         sel_plan = plans[plani]
         nefe_plan = nefes[plani]
-        pragmatic_plan = pragmatics[plani]
+        pragmatics_plan = pragmatics[plani]
         info_gain_plan = info_gains[plani]
-        return sel_plan, nefe_plan, pragmatic_plan, info_gain_plan, plans, nefes, pragmatics, info_gains
+        return sel_plan, nefe_plan, pragmatics_plan, info_gain_plan, plans, nefes, pragmatics, info_gains
+
+class IAIF_Agent(AIF_Agent):
+    ''' Class to implement an Intermittent Active Inference agent
+    '''
+    
 
 class AIF_Simulation:
     ''' Class to run Active Inference simulations with a given agent and generative process
@@ -1016,7 +1062,7 @@ class AIF_Simulation:
         self.agent.reset()
 
     ## Different run function
-    def run_inference_only(self, numsteps=100, a=None, random_a=False, reset=True, key=random.key(42)):
+    def run_inference_only(self, numsteps=100, a=None, random_a=False, reset=True, key=random.PRNGKey(42)):
         agent = self.agent
 
         if a == None:
@@ -1034,7 +1080,6 @@ class AIF_Simulation:
         aa = []
         aa_applied = []
         lll = []
-        LR = []
         # Start interaction loop
         for i in tqdm(range(numsteps)):
             # Select random action
@@ -1052,7 +1097,7 @@ class AIF_Simulation:
 
             # # Update belief state with observation
             key, use_key = random.split(key)
-            belief_state, ll, lr = agent.update_belief_state_obs(belief_state, agent.belief_noise, agent.belief_sys, o, key=use_key)
+            belief_state, ll = agent.update_belief_state_obs(belief_state, agent.belief_noise, agent.belief_sys, o, key=use_key)
             
             # Logging
             xx.append(x)
@@ -1061,12 +1106,11 @@ class AIF_Simulation:
             oo.append(o)
             bb.append(belief_state)
             lll.append(ll)
-            LR.append(lr)
 
             if jnp.isnan(belief_state[0]).any() or np.isnan(belief_state[1]).any():
                 print("NaN in belief state or covariance matrix detected. Stopping simulation.")
                 break
-        return bb, xx, oo, aa, aa_applied, lll, LR
+        return bb, xx, oo, aa, aa_applied, lll
     
     def run_aif_perceptual_delay(self, numsteps=100, break_criteria=None, reset=True, sys_belief_after_rt=None, key=random.key(42)):
         agent = self.agent
@@ -1075,8 +1119,6 @@ class AIF_Simulation:
 
         belief_state = agent.belief_state
 
-        print(f"DEBUG: Running simulation with initial system belief: {agent.belief_sys}")
-        print(f"DEBUG: Reaction time: {agent.params['reaction_time']}")
         action_buffer = jnp.zeros((reaction_time_steps, agent.params['dim_action']))
         observation_buffer = jnp.zeros((reaction_time_steps, agent.params['dim_observation']))
 
@@ -1088,7 +1130,6 @@ class AIF_Simulation:
         bb_after_rt = []
 
         lll = []
-        LR = []
         xx = [self.generative_process.x] # history of system states
         oo = []
         aa = []
@@ -1157,9 +1198,8 @@ class AIF_Simulation:
                 if reaction_time_steps > 0:
                     o = observation_buffer[0]
                 key, use_key = random.split(key)
-                belief_state, ll, lr = agent.update_belief_state_obs(belief_state, agent.belief_noise, agent.belief_sys,  o, key=use_key)
+                belief_state, ll = agent.update_belief_state_obs(belief_state, agent.belief_noise, agent.belief_sys,  o, key=use_key)
                 lll.append(ll)
-                LR.append(lr)
 
             bb.append(belief_state)
 
@@ -1171,4 +1211,231 @@ class AIF_Simulation:
                 if break_criteria(belief_state, x, o, a_applied, observation_buffer, action_buffer, i):
                     print("Break criteria met. Stopping simulation.")
                     break
-        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, LR, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS
+        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS
+
+    def run_iaif(self, numsteps=100, break_criteria=None, reset=True, sys_belief_after_rt=None, verbose=True, key=random.key(42)):
+
+        if reset:
+            self.reset()
+            
+        agent = self.agent
+
+        reaction_time_steps = int(agent.params['reaction_time']//agent.dt)
+        minimal_open_loop_steps = agent.params['ic_minimal_open_loop_steps']
+
+        belief_state = agent.belief_state
+        belief_sys = agent.belief_sys
+        belief_noise = agent.belief_noise
+
+        horizon = agent.params['horizon']
+
+        ### Intermittent Control
+        cur_plan = None
+        ic_step = 0
+        ic_div_threshold = agent.params['ic_div_threshold']
+        ic_timesteps = []
+        ic_pred_error = []
+        bb_predicted = {}
+        ic_efe_threshold = agent.params['ic_efe_threshold']
+        ic_efe_type = agent.params['ic_efe_type']
+        ic_use_remaining_nefe = agent.params['ic_use_remaining_nefe']
+        CUR_PRAGMATICS = []
+        CUR_PLAN = []
+
+        action_buffer = jnp.zeros((reaction_time_steps, agent.params['dim_action']))
+        observation_buffer = jnp.zeros((reaction_time_steps, agent.params['dim_observation']))
+
+        bb = [belief_state]
+        bb_after_rt = []
+        bb_sys = []
+        cur_pragmatics = None
+
+        lll = []
+        xx = [self.generative_process.x] 
+        oo = []
+        aa = []
+        aa_applied = []
+        NEFE_PLAN = []
+        PRAGMATIC_PLAN = []
+        INFO_GAIN_PLAN = []
+        NEFES = []
+        PRAGMATICS = []
+        INFO_GAINS = []
+        for i in range(numsteps):
+            if verbose:
+                print(f"--- Simulation step {i+1}/{numsteps} ---")
+
+            if i == reaction_time_steps and sys_belief_after_rt is not None:
+                belief_sys = sys_belief_after_rt
+
+            # Predict the state after reaction time
+            belief_state_after_rt = belief_state
+            if reaction_time_steps > 0:
+                for j in range(reaction_time_steps):
+                    a = action_buffer[j]
+                    key, use_key = random.split(key)
+                    belief_state_after_rt, _ = agent.update_belief_state(belief_state_after_rt, belief_noise, belief_sys, a, key=use_key)
+                
+            bb_after_rt.append(belief_state_after_rt)
+
+            ## IC Criteria
+            ic_criteria_met = False
+            prediction_error = 0.0
+            # Not planned yet
+            if cur_plan is None:
+                ic_criteria_met = "Start"
+                if verbose:
+                    print("IC: No plan yet.")
+            # Plan exhausted
+            elif ic_step == horizon-1:
+                ic_criteria_met = "Exhaustion"
+                if verbose:
+                    print("IC: Plan exhausted.")
+            elif ic_div_threshold is None and ic_efe_threshold is None:
+                # No criteria set, always replan
+                ic_criteria_met = "No Criteria"
+                if verbose:
+                    print("IC: No criteria set, triggering new plan.")
+            else:
+                if ic_div_threshold is not None and ic_div_threshold > 0:
+                    prediction_error = 0.5*(kl_jax(*ic_belief_horizon[ic_step], *belief_state_after_rt) + kl_jax(*belief_state_after_rt, *ic_belief_horizon[ic_step]))
+                    if prediction_error > ic_div_threshold:
+                        # Prediction error too large
+                        if verbose:
+                            print(f"IC: Prediction error {prediction_error} exceeds threshold {ic_div_threshold}.")
+                            print(f"Predicted belief: {ic_belief_horizon[ic_step][0]}\nCurrent belief: {belief_state_after_rt[0]}")
+                        ic_criteria_met = "Prediction Error"
+                elif ic_div_threshold == 0:
+                    # Always trigger new plan
+                    ic_criteria_met = "Prediction Error 0"
+                    if verbose:
+                        print("IC: KL threshold set to 0, triggering new plan.")
+
+                # Pragmatic Threshold
+                if ic_efe_threshold is not None and ic_efe_threshold > 0:
+                    if cur_pragmatics is not None:
+                        key, use_key = random.split(key)
+                        if ic_use_remaining_nefe:
+                            predicted_pragmatic = np.mean(cur_pragmatics[ic_step+1:])
+                            key, use_key = random.split(key)
+                            C_mean_samples = agent.sample_preference_distributions(belief_state_after_rt, belief_sys, use_key)
+                            key, use_key = random.split(key)
+                            step_nefes, _, _ = agent.calc_nefe(jnp.hstack([cur_plan[ic_step+1:], jnp.tile(cur_plan[-1], ic_step)]), C_mean_samples, belief_state_after_rt,  belief_noise, belief_sys, use_key) # Run with padded plan to get correct horizon (jax cannot handle changing horizon efficiently)
+                            pragmatic_value = jnp.mean(step_nefes[:horizon - ic_step - 1]) # Only consider the remaining steps in the plan for pragmatic value
+                        else:
+                            predicted_pragmatic = cur_pragmatics[ic_step]
+                            pragmatic_value = agent.calc_pragmatic_current_state(belief_state_after_rt, belief_noise, belief_sys, use_key)
+
+                        efe_error = (-pragmatic_value) - (-predicted_pragmatic) # Values are negative expected free energy 
+                        if ic_efe_type == "fixed":
+                            if efe_error > 0:
+                                if verbose:
+                                    print(f"IC Pragmatic Error: Predicted pragmatic: {predicted_pragmatic}, actual pragmatic: {pragmatic_value}. Error {efe_error:.2f}.")
+                                ic_criteria_met = "Pragmatic Error"
+                        elif ic_efe_type == "threshold":
+                            if efe_error > ic_efe_threshold:
+                                if verbose:
+                                    print(f"IC Pragmatic Error: Predicted pragmatic: {predicted_pragmatic}, actual pragmatic: {pragmatic_value}. Error {efe_error:.2f}%. Threshold {ic_efe_threshold:.2f}%.")
+                                ic_criteria_met = "Pragmatic Error"
+                        else:
+                            raise ValueError(f"Unknown ic_efe_type: {ic_efe_type}. Should be 'fixed' or 'threshold'.")
+                elif ic_efe_threshold == 0:
+                    # Always trigger new plan
+                    ic_criteria_met = "Pragmatic Error 0"
+                    if verbose:
+                        print("IC: Pragmatic threshold set to 0, triggering new plan.")
+            ic_pred_error.append(prediction_error)           
+            
+            # If minimal open loop steps not yet reached, do not update
+            if ic_step+1 < minimal_open_loop_steps and ic_criteria_met not in ["Start", "Exhaustion"] and ic_criteria_met:
+                ic_criteria_met = False
+                if verbose:
+                    print(f"IC: Overwriting trigger since minimal open loop steps not reached ({ic_step}/{minimal_open_loop_steps}).")
+
+            if ic_criteria_met:
+                # If intermittency criteria met or plan is exhausted, select action as usual
+                if verbose:
+                    print(f"Selecting new plan due to {ic_criteria_met}.")
+                key, use_key = random.split(key)
+                cur_plan, nefe_plan, pragmatic_plan, info_gain_plan, plans, nefes, pragmatics, info_gains = agent.select_action(belief_state_after_rt, belief_noise, belief_sys, key=use_key)
+                ic_step = 0
+                cur_pragmatics = pragmatic_plan
+            
+                # Create new belief prediction
+                ic_belief_horizon = []
+                belief_state_pred = belief_state_after_rt
+                for j in range(horizon):
+                    key, use_key = random.split(key)
+                    belief_state_pred, _ = agent.update_belief_state(belief_state_pred, belief_noise, belief_sys, a=cur_plan[j], key=use_key)
+                    ic_belief_horizon.append(belief_state_pred)
+                    bb_predicted[i+j+1] = belief_state_pred
+
+                ic_timesteps.append(i)
+            else:
+                ic_step += 1 # Increment IC step
+
+            # Select action from current plan
+            a_new = cur_plan[ic_step]
+
+            # Make system step
+            key, use_key = random.split(key)
+            o, x, a_applied = self.step(a_new, debug=True, key=use_key)
+
+            # Fill observation buffer with the new observation
+            if reaction_time_steps > 0:
+                observation_buffer = jnp.roll(observation_buffer, -1, axis=0)
+                observation_buffer = observation_buffer.at[-1].set(o)
+
+            ## LOGGING
+            NEFE_PLAN.append(nefe_plan)
+            PRAGMATIC_PLAN.append(pragmatic_plan)
+            INFO_GAIN_PLAN.append(info_gain_plan)
+            NEFES.append(nefes)
+            PRAGMATICS.append(pragmatics)
+            INFO_GAINS.append(info_gains)
+            xx.append(x)
+            aa.append(a_new)
+            aa_applied.append(a_applied)
+            oo.append(o)
+
+            # Update using buffered action
+            if reaction_time_steps > 0:
+                a = action_buffer[0]
+            else:
+                a = a_new
+            key, use_key = random.split(key)
+            belief_state, _ = agent.update_belief_state(belief_state, belief_noise, belief_sys, a, key=use_key)
+
+            # Fill action buffer with the selected action
+            if reaction_time_steps > 0:
+                action_buffer = jnp.roll(action_buffer, -1, axis=0)
+                action_buffer = action_buffer.at[-1].set(a_new)
+
+            # After initial reaction time, update belief using the buffered observation
+            if i >= (reaction_time_steps-1):
+                if reaction_time_steps > 0:
+                    # print(f"{(i+1)*dt}s: Update using o {observation_buffer[0]}")
+                    o = observation_buffer[0]
+                key, use_key = random.split(key)
+                belief_state, ll = agent.update_belief_state_obs(belief_state, belief_noise, belief_sys,  o, key=use_key)
+                lll.append(ll)
+
+            # LOGGING
+            bb.append(belief_state)
+            bb_sys.append(belief_sys)
+            
+            # Break if NaN in belief
+            if jnp.isnan(belief_state[0]).any() or np.isnan(belief_state[1]).any():
+                if verbose:
+                    print("NAN in belief. Breaking...")
+                break
+            
+            # Break if criteria met
+            if break_criteria is not None:
+                if break_criteria(belief_state, x, o, a_applied, observation_buffer, action_buffer, i):
+                    if verbose:
+                        print("Break criteria met. Stopping simulation.")
+                    break
+
+        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS, ic_timesteps, ic_pred_error, bb_predicted, CUR_PRAGMATICS, CUR_PLAN
+
