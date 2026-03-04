@@ -4,3 +4,4 @@
 _local*
 .vscode
 **/__pycache__/
+difai/test.ipynb

@@ -7,6 +7,7 @@ n_steps_o: 50
 lr_o: 0.0001
 use_info_gain: false
 use_observation_preference: true
+use_ukf_obs_pref: false
 use_pragmatic_value: true
 scale_pragmatic_value: 1
 select_max_pi: true
@@ -28,3 +29,10 @@ state_scaling: null
 reaction_time: 0.0
 grouped_state_updates: null
 exclude_observation_indices: null
+ic_minimal_open_loop_steps: 0
+use_ic: false
+ic_div_threshold: null
+ic_efe_threshold: null
+ic_efe_type: null
+ic_use_remaining_nefe: false
+prob_dynamics: null

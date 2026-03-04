@@ -7,7 +7,7 @@ from jax.scipy.linalg import block_diag
 import optax
 from tqdm import tqdm
 import numpy as np
-from difai.aif_tools_jax import unscented, softmax_jax, kl_jax, kl_normal_normal, gen_fixed_plans, refactor_noise_params, load_yaml_file
+from difai.aif_tools_jax import unscented, unscented_jax_n, softmax_jax, kl_jax, kl_normal_normal, gen_fixed_plans, refactor_noise_params, load_yaml_file
 from pathlib import Path
 from jax.debug import print as jaxprint
 
@@ -144,6 +144,7 @@ class AIF_Agent:
             n_samples_a_combine (int): Number of samples used to combine state beliefs if UKF is not used. Default is 200.
             n_samples_a_noise_sys (int): Number of samples used to estimate noise system parameters. Default is 10.
             use_complete_ukf (bool): Use the unscented Kalman filter for both state and system parameters in action update. Default is True.
+            use_ukf_obs_pref (bool): Use the unscented Kalman filter to sample observations for calculating observation-based pragmatic value. Default is True.
             C_index (int): Index of the observation parameter that is used to calculate the pragmatic value. 
             sys_dependent_C (tuple): If not None, the mean of the preference distribution is dependent on the system parameters. First entry is the index of the observation/state vector that is affected, second entry is the index of the system parameter that defines the mean of the preference distribution.
             state_dependent_C (tuple): If not None, the mean of the preference distribution is dependent on the state. First entry is the index of the observation/state vector that is affected, second entry is the index of the state that defines the mean of the preference distribution.
@@ -422,6 +423,7 @@ class AIF_Agent:
         """
         dim_state = params['dim_state']
         dim_noise = params['dim_noise']
+        dim_dynamics = params['dim_dynamics']
         dim_belief = len(belief_state[0])
 
         n_samples_a = params['n_samples_a']
@@ -446,8 +448,11 @@ class AIF_Agent:
             mean = jnp.hstack([belief_state[0], belief_sys[0]])
             cov = block_diag(belief_state[1], belief_sys[1]) 
 
+
             # Forward belief using unscented Kalman Filter
-            ukf_mean, ukf_cov = unscented(mean, cov, fn = sysfn)  
+            ukf_mean, ukf_cov = unscented_jax_n(mean, cov, dim_state + dim_dynamics, fn = sysfn)  
+            # ukf_mean, ukf_cov = unscented(mean, cov, fn = sysfn)  
+
 
             # Update belief about system state (retain belief about other parameters)
             belief_state = [ukf_mean[:dim_state], ukf_cov[:dim_state,:dim_state]]
@@ -480,7 +485,7 @@ class AIF_Agent:
 
                 if use_complete_ukf:
                     ## Run the Unscented Kalman Filter
-                    ukf_mean, ukf_cov = unscented(mean, cov, fn = sysfn)  
+                    ukf_mean, ukf_cov = unscented_jax_n(mean, cov, dim_state + dim_noise, fn = sysfn)  
                     ##
                     belief_state_new = [ukf_mean[:dim_state], ukf_cov[:dim_state,:dim_state]]
 
@@ -732,13 +737,22 @@ class AIF_Agent:
         n_samples_ig = n_samples_ig_s * n_samples_ig_o
         dim_state = params["dim_state"]
         dim_observation = params["dim_observation"]
+        dim_dynamics = params["dim_dynamics"]
         has_observation_noise = params['has_observation_noise']
         use_info_gain = params['use_info_gain']
         use_observation_preference = params['use_observation_preference']
+        use_ukf_obs_pref = params['use_ukf_obs_pref']
         sys_dependent_C = params['sys_dependent_C']
         state_dependent_C = params['state_dependent_C']
         C = params["C"]
         C_index = params['C_index']
+
+        if use_ukf_obs_pref:
+            def obsfn(xs):
+                s = xs[:dim_state]
+                sys = xs[dim_state:]
+                o = get_observation_complete(s, *sys)
+                return o
         
         def rollout_step(i, carry, pi):
             key = carry[0]
@@ -762,20 +776,31 @@ class AIF_Agent:
 
             if use_info_gain or use_observation_preference:
                 if use_observation_preference:
-                    # New version for dim_obs >= 1
-                    key, use_key = random.split(key)
-                    sample_states = random.multivariate_normal(use_key, *belief_state_pred, shape=(n_samples_obs_pref_s,))  # sample from state belief
-
                     key, use_key = random.split(key)
                     _, obs_variance = sample_obs_noise_params(belief_noise, n_samples_obs_pref_s, use_key)
 
-                    # Sample system parameters
-                    key, use_key = random.split(key)
-                    sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1], shape=(n_samples_obs_pref_s,))
+                    if use_ukf_obs_pref:
+                        # Use UKF to get distribution over observations
+                        mean = jnp.hstack([belief_state_pred[0], belief_sys[0]])
+                        cov = block_diag(belief_state_pred[1], belief_sys[1])
 
-                    # Halluzinate observations
-                    oo_noise_free = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states, sample_sys])) # sampled observations
+                        ukf_mean, ukf_cov = unscented_jax_n(mean, cov, dim_state + dim_dynamics, fn = obsfn)  
                     
+                        key, use_key = random.split(key)
+                        oo_noise_free = random.multivariate_normal(use_key, ukf_mean, ukf_cov, shape=(n_samples_obs_pref_s,))
+                    else:
+                        # Sample states
+                        key, use_key = random.split(key)
+                        sample_states = random.multivariate_normal(use_key, *belief_state_pred, shape=(n_samples_obs_pref_s,))  # sample from state belief
+
+                        # Sample system parameters
+                        key, use_key = random.split(key)
+                        sample_sys = random.multivariate_normal(use_key, belief_sys[0], belief_sys[1], shape=(n_samples_obs_pref_s,))
+
+                        # Sample noise free observations
+                        oo_noise_free = jnp.apply_along_axis(lambda xsys: get_observation_complete(xsys[:dim_state], *xsys[dim_state:]), 1, jnp.hstack([sample_states, sample_sys])) # sampled observations
+
+                    # Halluzinate observations (with noise)
                     def halluzinate_obs(o_noise_free, obs_variance_single, key):
                         if has_observation_noise:
                             hal_o = random.multivariate_normal(key, o_noise_free, jnp.diag(obs_variance_single), shape=(n_samples_obs_pref_o,))
@@ -785,10 +810,10 @@ class AIF_Agent:
                     keys = random.split(key, num=n_samples_obs_pref_s+1)
                     key = keys[0]
                     batch_keys = keys[1:]
-                    oo_pref = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
+                    oo_halluzinated = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
 
                     # Do I like observing this?
-                    oo_pref = oo_pref[:,C_index]
+                    oo_pref = oo_halluzinated[:,C_index]
                     if sys_dependent_C is not None or state_dependent_C is not None:
                         pragmatic =  jnp.mean(jnp.apply_along_axis(lambda C_mean: logpdf(oo_pref, C_mean, C[1]).mean(), 1, C_mean_samples))
                     else:
@@ -825,23 +850,22 @@ class AIF_Agent:
                             keys = random.split(key, num=n_samples_ig_s+1)
                             key = keys[0]
                             batch_keys = keys[1:]
-                            oo = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
+                            oo_ig = vmap(lambda o_noise_free, obs_variance_single, key: halluzinate_obs(o_noise_free, obs_variance_single, key), in_axes=(0,0,0), out_axes=0)(oo_noise_free, obs_variance, batch_keys).reshape(-1,dim_observation)
                         else:
                             # Use the same observations as for observation preference
                             # Select a subset of the observations
                             key, use_key = random.split(key)
-                            oo = random.choice(use_key, oo_pref, shape=(n_samples_ig_s * n_samples_ig_o,), replace=False) # select n_samples_ig_s * n_samples_ig_o observations from the observations halluzinated for the observation preference
-
+                            oo_ig = random.choice(use_key, oo_halluzinated, shape=(n_samples_ig_s * n_samples_ig_o,), replace=False) # select n_samples_ig_s * n_samples_ig_o observations from the observations halluzinated for the observation preference
                         # # Do I learn about s from observing o?
                         def calc_info_gain(o, key):
-                            belief_state_o, _, _ = _update_belief(belief_state_pred, belief_noise, belief_sys, o, key=key)
+                            belief_state_o, _ = _update_belief(belief_state_pred, belief_noise, belief_sys, o, key=key)
                             kl_state = kl_jax(*belief_state_o, *belief_state)
                             return kl_state 
                         
                         keys = random.split(key, num=n_samples_ig+1)
                         key = keys[0]
                         batch_keys = keys[1:]
-                        kl_o = vmap(calc_info_gain, in_axes=(0,0), out_axes=0)(oo, batch_keys)
+                        kl_o = vmap(calc_info_gain, in_axes=(0,0), out_axes=0)(oo_ig, batch_keys)
                         info_gain = jnp.mean(kl_o)
                     nefe += info_gain
 
@@ -1235,6 +1259,7 @@ class AIF_Simulation:
         ic_div_threshold = agent.params['ic_div_threshold']
         ic_timesteps = []
         ic_pred_error = []
+        IC_CRITERIA = []
         bb_predicted = {}
         ic_efe_threshold = agent.params['ic_efe_threshold']
         ic_efe_type = agent.params['ic_efe_type']
@@ -1248,7 +1273,7 @@ class AIF_Simulation:
         bb = [belief_state]
         bb_after_rt = []
         bb_sys = []
-        cur_pragmatics = None
+        cur_nefe = None
 
         lll = []
         xx = [self.generative_process.x] 
@@ -1291,67 +1316,68 @@ class AIF_Simulation:
                 ic_criteria_met = "Exhaustion"
                 if verbose:
                     print("IC: Plan exhausted.")
-            elif ic_div_threshold is None and ic_efe_threshold is None:
-                # No criteria set, always replan
-                ic_criteria_met = "No Criteria"
-                if verbose:
-                    print("IC: No criteria set, triggering new plan.")
             else:
-                if ic_div_threshold is not None and ic_div_threshold > 0:
-                    prediction_error = 0.5*(kl_jax(*ic_belief_horizon[ic_step], *belief_state_after_rt) + kl_jax(*belief_state_after_rt, *ic_belief_horizon[ic_step]))
-                    if prediction_error > ic_div_threshold:
-                        # Prediction error too large
+                # If minimal open loop steps not yet reached, do not update
+                if ic_step+1 < minimal_open_loop_steps and ic_criteria_met not in ["Start", "Exhaustion"] and ic_criteria_met:
+                    ic_criteria_met = False
+                    if verbose:
+                        print(f"IC: Overwriting trigger since minimal open loop steps not reached ({ic_step}/{minimal_open_loop_steps}).")
+                else:
+                    if ic_div_threshold is None and ic_efe_threshold is None:
+                        # No intermittency, always replan
+                        ic_criteria_met = "Standard AIF"
                         if verbose:
-                            print(f"IC: Prediction error {prediction_error} exceeds threshold {ic_div_threshold}.")
-                            print(f"Predicted belief: {ic_belief_horizon[ic_step][0]}\nCurrent belief: {belief_state_after_rt[0]}")
-                        ic_criteria_met = "Prediction Error"
-                elif ic_div_threshold == 0:
-                    # Always trigger new plan
-                    ic_criteria_met = "Prediction Error 0"
-                    if verbose:
-                        print("IC: KL threshold set to 0, triggering new plan.")
-
-                # Pragmatic Threshold
-                if ic_efe_threshold is not None and ic_efe_threshold > 0:
-                    if cur_pragmatics is not None:
-                        key, use_key = random.split(key)
-                        if ic_use_remaining_nefe:
-                            predicted_pragmatic = np.mean(cur_pragmatics[ic_step+1:])
-                            key, use_key = random.split(key)
-                            C_mean_samples = agent.sample_preference_distributions(belief_state_after_rt, belief_sys, use_key)
-                            key, use_key = random.split(key)
-                            step_nefes, _, _ = agent.calc_nefe(jnp.hstack([cur_plan[ic_step+1:], jnp.tile(cur_plan[-1], ic_step)]), C_mean_samples, belief_state_after_rt,  belief_noise, belief_sys, use_key) # Run with padded plan to get correct horizon (jax cannot handle changing horizon efficiently)
-                            pragmatic_value = jnp.mean(step_nefes[:horizon - ic_step - 1]) # Only consider the remaining steps in the plan for pragmatic value
-                        else:
-                            predicted_pragmatic = cur_pragmatics[ic_step]
-                            pragmatic_value = agent.calc_pragmatic_current_state(belief_state_after_rt, belief_noise, belief_sys, use_key)
-
-                        efe_error = (-pragmatic_value) - (-predicted_pragmatic) # Values are negative expected free energy 
-                        if ic_efe_type == "fixed":
-                            if efe_error > 0:
+                            print("IC: No intermittency, always triggering new plan (Standard AIF).")
+                    else:
+                        if ic_div_threshold is not None and ic_div_threshold > 0:
+                            prediction_error = 0.5*(kl_jax(*ic_belief_horizon[ic_step], *belief_state_after_rt) + kl_jax(*belief_state_after_rt, *ic_belief_horizon[ic_step]))
+                            if prediction_error > ic_div_threshold:
+                                # Prediction error too large
                                 if verbose:
-                                    print(f"IC Pragmatic Error: Predicted pragmatic: {predicted_pragmatic}, actual pragmatic: {pragmatic_value}. Error {efe_error:.2f}.")
-                                ic_criteria_met = "Pragmatic Error"
-                        elif ic_efe_type == "threshold":
-                            if efe_error > ic_efe_threshold:
-                                if verbose:
-                                    print(f"IC Pragmatic Error: Predicted pragmatic: {predicted_pragmatic}, actual pragmatic: {pragmatic_value}. Error {efe_error:.2f}%. Threshold {ic_efe_threshold:.2f}%.")
-                                ic_criteria_met = "Pragmatic Error"
-                        else:
-                            raise ValueError(f"Unknown ic_efe_type: {ic_efe_type}. Should be 'fixed' or 'threshold'.")
-                elif ic_efe_threshold == 0:
-                    # Always trigger new plan
-                    ic_criteria_met = "Pragmatic Error 0"
-                    if verbose:
-                        print("IC: Pragmatic threshold set to 0, triggering new plan.")
+                                    print(f"IC: Prediction error {prediction_error} exceeds threshold {ic_div_threshold}.")
+                                    print(f"Predicted belief: {ic_belief_horizon[ic_step][0]}\nCurrent belief: {belief_state_after_rt[0]}")
+                                ic_criteria_met = "Prediction Error"
+                        elif ic_div_threshold == 0:
+                            # Always trigger new plan
+                            ic_criteria_met = "Prediction Error 0"
+                            if verbose:
+                                print("IC: DIV threshold set to 0, triggering new plan.")
+                        # EFE Threshold (only run calculation if DIV criteria not already met, to save computation)
+                        if not ic_criteria_met and ic_efe_threshold is not None and ic_efe_threshold > 0:
+                            if cur_nefe is not None:
+                                key, use_key = random.split(key)
+                                if ic_use_remaining_nefe:
+                                    predicted_nefe = np.mean(cur_nefe[ic_step+1:])
+                                    key, use_key = random.split(key)
+                                    C_mean_samples = agent.sample_preference_distributions(belief_state_after_rt, belief_sys, use_key)
+                                    key, use_key = random.split(key)
+                                    step_nefes, _, _ = agent.calc_nefe(jnp.hstack([cur_plan[ic_step+1:], jnp.tile(cur_plan[-1], ic_step)]), C_mean_samples, belief_state_after_rt,  belief_noise, belief_sys, use_key) # Run with padded plan to get correct horizon (jax cannot handle changing horizon efficiently)
+                                    nefe = jnp.mean(step_nefes[:horizon - ic_step - 1]) # Only consider the remaining steps in the plan 
+                                else:
+                                    predicted_nefe = cur_nefe[ic_step]
+                                    nefe = agent.calc_pragmatic_current_state(belief_state_after_rt, belief_noise, belief_sys, use_key)
+
+                                efe_error = (-nefe) - (-predicted_nefe) # Values are negative expected free energy 
+                                if ic_efe_type == "fixed":
+                                    if efe_error > 0:
+                                        if verbose:
+                                            print(f"IC EFE Error: Predicted nefe: {predicted_nefe}, actual nefe: {nefe}. Error {efe_error:.2f}.")
+                                        ic_criteria_met = "EFE Error"
+                                elif ic_efe_type == "threshold":
+                                    if efe_error > ic_efe_threshold:
+                                        if verbose:
+                                            print(f"IC EFE Error: Predicted nefe: {predicted_nefe}, actual nefe: {nefe}. Error {efe_error:.2f}%. Threshold {ic_efe_threshold:.2f}%.")
+                                        ic_criteria_met = "EFE Error"
+                                else:
+                                    raise ValueError(f"Unknown ic_efe_type: {ic_efe_type}. Should be 'fixed' or 'threshold'.")
+                        elif ic_efe_threshold == 0:
+                            # Always trigger new plan
+                            ic_criteria_met = "EFE Error 0"
+                            if verbose:
+                                print("IC: EFE threshold set to 0, always triggering new plan.")
             ic_pred_error.append(prediction_error)           
             
-            # If minimal open loop steps not yet reached, do not update
-            if ic_step+1 < minimal_open_loop_steps and ic_criteria_met not in ["Start", "Exhaustion"] and ic_criteria_met:
-                ic_criteria_met = False
-                if verbose:
-                    print(f"IC: Overwriting trigger since minimal open loop steps not reached ({ic_step}/{minimal_open_loop_steps}).")
-
+            
             if ic_criteria_met:
                 # If intermittency criteria met or plan is exhausted, select action as usual
                 if verbose:
@@ -1359,7 +1385,7 @@ class AIF_Simulation:
                 key, use_key = random.split(key)
                 cur_plan, nefe_plan, pragmatic_plan, info_gain_plan, plans, nefes, pragmatics, info_gains = agent.select_action(belief_state_after_rt, belief_noise, belief_sys, key=use_key)
                 ic_step = 0
-                cur_pragmatics = pragmatic_plan
+                cur_nefe = nefe_plan
             
                 # Create new belief prediction
                 ic_belief_horizon = []
@@ -1397,6 +1423,7 @@ class AIF_Simulation:
             aa.append(a_new)
             aa_applied.append(a_applied)
             oo.append(o)
+            IC_CRITERIA.append(ic_criteria_met)
 
             # Update using buffered action
             if reaction_time_steps > 0:
@@ -1437,5 +1464,5 @@ class AIF_Simulation:
                         print("Break criteria met. Stopping simulation.")
                     break
 
-        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS, ic_timesteps, ic_pred_error, bb_predicted, CUR_PRAGMATICS, CUR_PLAN
+        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS, ic_timesteps, ic_pred_error, IC_CRITERIA, bb_predicted, CUR_PRAGMATICS, CUR_PLAN
 

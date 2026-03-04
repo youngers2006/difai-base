@@ -34,19 +34,19 @@ def unscented_weights_jax(n, lam=3, alpha=1e-3, beta=2):
     weights_cov = weights_cov.at[0].set(weights_mean[0] + (1 - alpha**2 + beta))  #weights_cov[0] = weights_mean[0] + (1 - alpha**2 + beta)
     return weights_mean, weights_cov
 
-def unscented_jax(mean, cov, fn, kappa=0, alpha=1e-3, beta=2):
+def unscented_jax_n(mean, cov, n, fn, kappa=0, alpha=1e-3, beta=2):
     """
     Take a Gaussian, parameterised by mean and covariance, and apply a nonlinear function to it.
     Return the mean and covariance of the resulting Gaussian.
     fn(x) takes a (N,D) array of N samples of dimension D and returns a (N,D) array of N samples of dimension D.
     lam, alpha, beta are "fiddle factors" and don't usually need much tuning.
     """    
-    n = len(mean)
     lam = alpha**2 * (n + kappa) - n
     # get the sigma points
     points = sigma_points_jax(mean, cov, lam, alpha, beta)
     # apply fn
     transformed = jnp.apply_along_axis(fn, 0, points)
+    m = transformed.shape[0]
     # get the weights
     weights_mean, weights_cov = unscented_weights_jax(n, lam, alpha, beta)
 
@@ -58,20 +58,29 @@ def unscented_jax(mean, cov, fn, kappa=0, alpha=1e-3, beta=2):
                 jnp.outer(transformed[:, i] - mean_hat,
                             transformed[:, i] - mean_hat)
         return carry
-    cov_hat = fori_loop(0, 2 * n + 1, body_fun, jnp.zeros((n, n)))
+    cov_hat = fori_loop(0, 2 * n + 1, body_fun, jnp.zeros((m, m)))
 
     # Ensure diagonal is positive
-    cov_hat = cov_hat.at[jnp.diag_indices(n)].set(jnp.clip(jnp.diag(cov_hat), min=EPSILON))
+    cov_hat = cov_hat.at[jnp.diag_indices(m)].set(jnp.clip(jnp.diag(cov_hat), min=EPSILON))
 
     return mean_hat, cov_hat
 
-def unscented(mean, cov, fn, kappa=3e6, alpha=1e-3, beta=2):
-    return unscented_jax(mean, cov, fn, kappa, alpha, beta)
+
+def unscented(mean, cov, fn, kappa=0, alpha=1e-3, beta=2):
+    """
+    Take a Gaussian, parameterised by mean and covariance, and apply a nonlinear function to it.
+    Return the mean and covariance of the resulting Gaussian.
+    fn(x) takes a (N,D) array of N samples of dimension D and returns a (N,E) array of N samples of dimension E.
+    lam, alpha, beta are "fiddle factors" and don't usually need much tuning.
+    """    
+    n = len(mean)
+    return unscented_jax_n(mean, cov, n, fn, kappa, alpha, beta)
+
 
 # Jitting
 @partial(jit, static_argnums=(2,3,4,5))
 def unscented_jit(mean, cov, fn, kappa=3e6, alpha=1e-3, beta=2):
-    return unscented_jax(mean, cov, fn, kappa, alpha, beta)
+    return unscented(mean, cov, fn, kappa, alpha, beta)
 
 def softmax_jax(x):
     e = jnp.exp(x - x.max())
