@@ -3,13 +3,14 @@ import jax.numpy as jnp
 from jax.lax import fori_loop
 from jax import jit, vmap, value_and_grad, random, config
 from jax.scipy.stats.multivariate_normal import logpdf
-from jax.scipy.linalg import block_diag
+from jax.scipy.linalg import block_diag, cho_factor, cho_solve
 import optax
 from tqdm import tqdm
 import numpy as np
 from difai.aif_tools_jax import unscented, unscented_jax_n, softmax_jax, kl_jax, kl_normal_normal, gen_fixed_plans, refactor_noise_params, load_yaml_file
 from pathlib import Path
 from jax.debug import print as jaxprint
+from functools import partial
 
 # Epsilon that is added to prevent numerical problems
 EPS = 1e-12
@@ -93,7 +94,7 @@ class AIF_Agent:
             generative_model (AIF_Env): The generative model of the agent.
             noise_params (dict): Dictionary with noise parameters. Keys are the name of the noise source ('observation_std', 'state_dependent_obs_noise', 'constant_motor_noise', 'signal_dependent_noise'), and values are tuples containing the indices of the affected dimensions.
             params (dict): Dictionary with additional parameters for the agent. If None, default parameters are used.
-        """   
+        """ 
         self.generative_model = generative_model # 
         if params is not None:
             self.params = params
@@ -1237,6 +1238,57 @@ class AIF_Simulation:
                     break
         return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS
 
+    # New Code
+    # --------------------------
+    @staticmethod
+    def predict_observation(agent: AIF_Agent, belief_state, belief_sys, alpha=1.0, beta=2, kappa=0):
+        # Get the mean and covariance of the state belief
+        mean = belief_state[0] # (n,)
+        cov = belief_state[1] # (n, n)
+        n = mean.shape[0]
+
+        lam = (alpha ** 2) * (n + kappa) - n
+        c = n + lam
+        L = jnp.linalg.cholesky(cov + 1e-12 * jnp.eye(n)) # cholesky decomposition ; (n, n)
+
+        sqrt_sigma = jnp.sqrt(c) * L # (n, n)
+        X_sp = jnp.vstack([mean, mean + sqrt_sigma.T, mean - sqrt_sigma.T]) # (2n + 1, n)
+
+        Z_sp = vmap(
+            agent._get_observation_complete, in_axes=(0, None, None)
+        )(X_sp, *belief_sys[0]) # (2n + 1, m)
+
+        W_m = jnp.full((2 * n + 1,), 1 / (2 * c)).at[0].set(lam / c) # (2n + 1,)
+        W_c = W_m.at[0].set(lam / c + (1 - (alpha ** 2) + beta)) # (2n + 1,)
+
+        y_hat = W_m @ Z_sp # (m,)
+        dZ = Z_sp - y_hat # (2n + 1, m)
+        Pzz = (W_c[:, None] * dZ).T @ dZ # ((2n+1, 1) * (2n+1, m)).T @ (2n+1, m) -> (m, m)
+        Pzz = 0.5 * (Pzz + Pzz.T)
+        return y_hat, Pzz
+
+    @partial(jit, static_argnums=(0, 1))
+    def free_energy_trigger_prior(self, agent, belief_state, belief_sys, o, R):
+
+        y_hat, Pzz = self.predict_observation(agent, belief_state, belief_sys)
+
+        D = o.shape[0]
+        e = o - y_hat
+
+        R_chol = cho_factor(R + 1e-12 * jnp.eye(D))
+        accuracy = 0.5 * e @ cho_solve(R_chol, e)
+        uncertainty = 0.5 * jnp.trace(cho_solve(R_chol, Pzz))
+        const = 0.5 * (D * jnp.log(2 * jnp.pi) + 2 * jnp.sum(jnp.log(jnp.diag(R_chol[0]))))
+
+        return accuracy + uncertainty + const
+
+    def ii_trigger(self, agent, belief_state, belief_sys, o, R, tau):
+        F = self.free_energy_trigger_prior(
+            agent, belief_state, belief_sys, o, R
+        )
+        return F > tau, F
+    # --------------------------
+
     def run_iaif(self, numsteps=100, break_criteria=None, reset=True, sys_belief_after_rt=None, verbose=True, key=random.key(42)):
 
         if reset:
@@ -1247,25 +1299,32 @@ class AIF_Simulation:
         reaction_time_steps = int(agent.params['reaction_time']//agent.dt)
         minimal_open_loop_steps = agent.params['ic_minimal_open_loop_steps']
 
-        belief_state = agent.belief_state
-        belief_sys = agent.belief_sys
-        belief_noise = agent.belief_noise
+        belief_state = agent.belief_state # Belief about system state
+        belief_sys = agent.belief_sys # Belief about system parameters
+        belief_noise = agent.belief_noise # Belief about system noise
 
         horizon = agent.params['horizon']
 
         ### Intermittent Control
         cur_plan = None
-        ic_step = 0
-        ic_div_threshold = agent.params['ic_div_threshold']
-        ic_timesteps = []
+        ic_step = 0 # where in the current plan we are
+        ic_div_threshold = agent.params['ic_div_threshold'] # div trigger threshold
+        ic_timesteps = [] # when replanning happened
         ic_pred_error = []
         IC_CRITERIA = []
         bb_predicted = {}
-        ic_efe_threshold = agent.params['ic_efe_threshold']
-        ic_efe_type = agent.params['ic_efe_type']
         ic_use_remaining_nefe = agent.params['ic_use_remaining_nefe']
         CUR_PRAGMATICS = []
         CUR_PLAN = []
+
+        ### Intermittent Inference
+        ic_efe_threshold = agent.params['ic_efe_threshold'] # efe trigger threshold
+        ic_efe_type = agent.params['ic_efe_type']
+        ii_threshold = agent.params.get('ii_threshold', None)   # None = always infer
+        use_ii = ii_threshold is not None
+        R = jnp.diag(jnp.exp(2.0 * belief_noise[0]))
+        ii_fired = False
+        II_F, II_FIRED = [], []
 
         action_buffer = jnp.zeros((reaction_time_steps, agent.params['dim_action']))
         observation_buffer = jnp.zeros((reaction_time_steps, agent.params['dim_observation']))
@@ -1283,7 +1342,7 @@ class AIF_Simulation:
         NEFE_PLAN = []
         PRAGMATIC_PLAN = []
         INFO_GAIN_PLAN = []
-        NEFES = []
+        NEFES = [] # negative expected free energy
         PRAGMATICS = []
         INFO_GAINS = []
         for i in range(numsteps):
@@ -1299,7 +1358,11 @@ class AIF_Simulation:
                 for j in range(reaction_time_steps):
                     a = action_buffer[j]
                     key, use_key = random.split(key)
-                    belief_state_after_rt, _ = agent.update_belief_state(belief_state_after_rt, belief_noise, belief_sys, a, key=use_key)
+
+                    # Use generative model to generate the belief state
+                    belief_state_after_rt, _ = agent.update_belief_state(
+                        belief_state_after_rt, belief_noise, belief_sys, a, key=use_key
+                    )
                 
             bb_after_rt.append(belief_state_after_rt)
 
@@ -1443,10 +1506,24 @@ class AIF_Simulation:
                 if reaction_time_steps > 0:
                     # print(f"{(i+1)*dt}s: Update using o {observation_buffer[0]}")
                     o = observation_buffer[0]
-                key, use_key = random.split(key)
-                belief_state, ll = agent.update_belief_state_obs(belief_state, belief_noise, belief_sys,  o, key=use_key)
-                lll.append(ll)
 
+                if use_ii:
+                    ii_fired, F_prior = self.ii_trigger(
+                        agent, belief_state, belief_sys, o, R, ii_threshold
+                    )
+                    ii_fired = bool(ii_fired)
+                    II_FIRED.append(ii_fired)
+                    II_F.append(float(F_prior))
+                else:
+                    ii_fired = True
+
+                if ii_fired:
+                    key, use_key = random.split(key)
+                    belief_state, ll = agent.update_belief_state_obs(belief_state, belief_noise, belief_sys,  o, key=use_key)
+                    lll.append(ll)
+                else:
+                    lll.append(None)
+            
             # LOGGING
             bb.append(belief_state)
             bb_sys.append(belief_sys)
@@ -1464,5 +1541,4 @@ class AIF_Simulation:
                         print("Break criteria met. Stopping simulation.")
                     break
 
-        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS, ic_timesteps, ic_pred_error, IC_CRITERIA, bb_predicted, CUR_PRAGMATICS, CUR_PLAN
-
+        return bb, bb_after_rt, xx, oo, aa, aa_applied, lll, NEFE_PLAN, PRAGMATIC_PLAN, INFO_GAIN_PLAN, NEFES, PRAGMATICS, INFO_GAINS, ic_timesteps, ic_pred_error, IC_CRITERIA, bb_predicted, CUR_PRAGMATICS, CUR_PLAN, II_F, II_FIRED
