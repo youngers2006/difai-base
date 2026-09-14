@@ -3,11 +3,11 @@ from setuptools import setup, find_packages
 setup(
    name='difai',
    version='1.0',
-   author='Markus Klar',
-   author_email='markus.klar@glasgow.ac.uk',
+   author='Markus Klar, Samuel Younger',
+   author_email='markus.klar@glasgow.ac.uk, Samuel.Younger24@imperial.ac.uk',
    packages=['difai'],
    package_data={'': ['**']},
-   url='https://github.com/mkl4r/difai-base',
+   url='https://github.com/youngers2006/difai-base.git',
    license='LICENSE',
    python_requires='>=3.11',
    install_requires=[
