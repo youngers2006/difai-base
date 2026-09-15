@@ -1267,10 +1267,11 @@ class AIF_Simulation:
         Pzz = 0.5 * (Pzz + Pzz.T)
         return y_hat, Pzz
 
+    @staticmethod
     @partial(jit, static_argnums=(0, 1))
-    def free_energy_trigger_prior(self, agent, belief_state, belief_sys, o, R):
+    def free_energy_trigger_prior(agent, belief_state, belief_sys, o, R):
 
-        y_hat, Pzz = self.predict_observation(agent, belief_state, belief_sys)
+        y_hat, Pzz = AIF_Simulation.predict_observation(agent, belief_state, belief_sys)
 
         D = o.shape[0]
         e = o - y_hat
